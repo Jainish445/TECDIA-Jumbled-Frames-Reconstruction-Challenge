@@ -1,7 +1,4 @@
-"""
-Jumbled Frames Reconstruction Challenge
-Author: Solution for Video Frame Ordering
-"""
+
 
 import cv2
 import numpy as np
@@ -128,17 +125,69 @@ class FrameReconstructor:
         
         return similarity_matrix
     
-    def greedy_path_reconstruction(self, similarity_matrix):
+    def find_starting_frame(self, similarity_matrix):
+        """
+        Find the actual starting frame of the video sequence.
+        The starting frame should have:
+        1. Exactly ONE strong forward connection (to frame 2)
+        2. NO strong backward connections (nothing comes before it)
+        """
+        print("Detecting starting frame...")
+        n = len(similarity_matrix)
+        
+        # For each frame, compute:
+        # - Best forward similarity (max similarity to any frame)
+        # - Number of frames that strongly point to it (backward connections)
+        
+        start_scores = []
+        
+        for i in range(n):
+            # Get top similarities for this frame
+            similarities = similarity_matrix[i].copy()
+            similarities[i] = 0  # Exclude self
+            
+            # Best forward connection
+            best_forward = np.max(similarities)
+            
+            # Count how many frames strongly point TO this frame
+            # (i.e., this frame is their best match)
+            backward_count = 0
+            threshold = np.percentile(similarity_matrix[similarity_matrix > 0], 85)
+            
+            for j in range(n):
+                if i != j:
+                    # Is frame i the best or near-best match for frame j?
+                    if similarity_matrix[j, i] > threshold:
+                        # Check if i is among j's top candidates
+                        j_similarities = similarity_matrix[j].copy()
+                        j_similarities[j] = 0
+                        if similarity_matrix[j, i] >= np.sort(j_similarities)[-3]:  # Top 3
+                            backward_count += 1
+            
+            # Starting frame should have:
+            # - Strong forward connection (high best_forward)
+            # - Few backward connections (low backward_count)
+            # Score: prioritize frames with strong forward but weak backward
+            start_score = best_forward * (1.0 / (1.0 + backward_count))
+            start_scores.append(start_score)
+        
+        # Get top candidates
+        start_scores = np.array(start_scores)
+        top_candidates = np.argsort(start_scores)[-10:][::-1]  # Top 10 candidates
+        
+        print(f"Top starting frame candidates: {top_candidates[:5]}")
+        print(f"  Scores: {[start_scores[i] for i in top_candidates[:5]]}")
+        
+        # Return the best candidate
+        return top_candidates[0]
+    
+    def greedy_path_reconstruction(self, similarity_matrix, start_idx):
         """
         Reconstruct frame order using greedy nearest-neighbor approach
-        with backtracking to avoid dead ends
+        Starting from the detected start frame
         """
-        print("Reconstructing frame order...")
+        print(f"Reconstructing frame order from frame {start_idx}...")
         n = len(self.frames)
-        
-        # Find the best starting frame (one with a clear strong neighbor)
-        avg_similarities = np.mean(similarity_matrix, axis=1)
-        start_idx = np.argmax(avg_similarities)
         
         # Track used frames
         used = set([start_idx])
@@ -167,6 +216,58 @@ class FrameReconstructor:
         pbar.close()
         
         return path
+    
+    def try_multiple_starts_and_pick_best(self, similarity_matrix):
+        """
+        Try building sequences from multiple candidate starting points
+        and pick the one with the highest average similarity
+        """
+        print("Testing multiple starting points...")
+        n = len(similarity_matrix)
+        
+        # Get multiple starting candidates
+        start_scores = []
+        for i in range(n):
+            similarities = similarity_matrix[i].copy()
+            similarities[i] = 0
+            best_forward = np.max(similarities)
+            
+            backward_count = 0
+            threshold = np.percentile(similarity_matrix[similarity_matrix > 0], 85)
+            for j in range(n):
+                if i != j and similarity_matrix[j, i] > threshold:
+                    j_similarities = similarity_matrix[j].copy()
+                    j_similarities[j] = 0
+                    if similarity_matrix[j, i] >= np.sort(j_similarities)[-3]:
+                        backward_count += 1
+            
+            start_score = best_forward * (1.0 / (1.0 + backward_count))
+            start_scores.append(start_score)
+        
+        # Get top 5 candidates
+        candidates = np.argsort(start_scores)[-5:][::-1]
+        
+        best_path = None
+        best_avg_similarity = 0
+        
+        for candidate in candidates:
+            # Build path from this candidate
+            path = self.greedy_path_reconstruction(similarity_matrix, candidate)
+            
+            # Compute average similarity along this path
+            total_sim = 0
+            for i in range(len(path) - 1):
+                total_sim += similarity_matrix[path[i], path[i+1]]
+            avg_sim = total_sim / (len(path) - 1)
+            
+            print(f"  Candidate {candidate}: Average similarity = {avg_sim:.4f}")
+            
+            if avg_sim > best_avg_similarity:
+                best_avg_similarity = avg_sim
+                best_path = path
+        
+        print(f"Selected best path with average similarity: {best_avg_similarity:.4f}")
+        return best_path
     
     def optimize_sequence(self, path, similarity_matrix, iterations=3):
         """
@@ -230,8 +331,8 @@ class FrameReconstructor:
         # Step 2: Build similarity matrix
         similarity_matrix = self.build_similarity_matrix()
         
-        # Step 3: Reconstruct frame order
-        frame_order = self.greedy_path_reconstruction(similarity_matrix)
+        # Step 3: Find best starting point and reconstruct
+        frame_order = self.try_multiple_starts_and_pick_best(similarity_matrix)
         
         # Step 4: Optimize sequence
         frame_order = self.optimize_sequence(frame_order, similarity_matrix)
